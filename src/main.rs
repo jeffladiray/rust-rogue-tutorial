@@ -54,6 +54,8 @@ const INVENTORY_WIDTH: i32 = 50;
 const HEAL_AMOUNT: i32 = 4;
 const LIGHTNING_RANGE: i32 = 5;
 const LIGHTNING_DAMAGE: i32 = 40;
+const CONFUSION_RANGE: i32 = 5;
+const CONFUSE_TURN_COUNT: i32 = 10;
 
 // NOTICE: FOV parameters
 const FOV_ALGORITHM: FovAlgorithm = FovAlgorithm::Basic;
@@ -276,6 +278,10 @@ impl DeathCallback {
 #[derive(Clone, Debug, PartialEq)]
 enum Ai {
     Basic,
+    Confused {
+        previous_ai: Box<Ai>,
+        num_turns: i32,
+    }
 }
 
 struct Messages {
@@ -300,6 +306,7 @@ impl Messages {
 enum Item {
     Heal,
     ScrollOfLightning,
+    ScrollOfConfusion,
 }
 
 enum UseResult {
@@ -364,7 +371,7 @@ fn make_map(game_objects: &mut Vec<GameObject>) -> Map {
         let failed = rooms.iter().any(|other_room| new_room.is_intersecting(other_room));
         if !failed {
             make_room(new_room, &mut map);
-            place_objects(new_room, &map, game_objects);
+            place_game_objects(new_room, &map, game_objects);
 
             let (new_x, new_y) = new_room.center();
             if rooms.is_empty() {
@@ -386,7 +393,7 @@ fn make_map(game_objects: &mut Vec<GameObject>) -> Map {
     map
 }
 
-fn place_objects(room: Rectangle, map: &Map, game_objects: &mut Vec<GameObject>) {
+fn place_game_objects(room: Rectangle, map: &Map, game_objects: &mut Vec<GameObject>) {
     let monster_count = rand::thread_rng().gen_range(0, MAX_ROOM_MONSTERS + 1);
     for _ in 0..monster_count {
         let x = rand::thread_rng().gen_range(room.x1 + 1, room.x2);
@@ -441,7 +448,7 @@ fn place_objects(room: Rectangle, map: &Map, game_objects: &mut Vec<GameObject>)
                 );
                 game_object.item = Some(Item::Heal);
                 game_object
-            } else {
+            } else if dice < 0.8 {
                 let mut game_object = GameObject::new(
                     x,
                     y,
@@ -451,6 +458,10 @@ fn place_objects(room: Rectangle, map: &Map, game_objects: &mut Vec<GameObject>)
                     false
                 );
                 game_object.item = Some(Item::ScrollOfLightning);
+                game_object
+            } else {
+                let mut game_object = GameObject::new(x, y, 'c', LIGHT_YELLOW, "scroll of confusion", false);
+                game_object.item = Some(Item::ScrollOfConfusion);
                 game_object
             };
 
@@ -542,11 +553,9 @@ fn render_all(tcod: &mut Tcod, game: &mut Game, game_objects: &Vec<GameObject>, 
 
             let explored = &mut game.map[x as usize][y as usize].explored;
             if visible {
-                // since it's visible, explore it
                 *explored = true;
             }
             if *explored {
-                // show explored tiles only (any visible tile is explored already)
                 tcod.con
                     .set_char_background(x, y, color, BackgroundFlag::Set);
             }
@@ -704,6 +713,20 @@ fn handle_keys(tcod: &mut Tcod, game: &mut Game, game_objects: &mut Vec<GameObje
 }
 
 fn ai_take_turn(monster_id: usize, tcod: &Tcod, game: &mut Game, game_objects: &mut Vec<GameObject>) {
+    use Ai::*;
+    if let Some(ai) = game_objects[monster_id].ai.take() {
+        let new_ai = match ai {
+            Basic => ai_basic(monster_id, tcod, game, game_objects),
+            Confused {
+                previous_ai,
+                num_turns,
+            } => ai_confused(monster_id, tcod, game, game_objects, previous_ai, num_turns),
+        };
+        game_objects[monster_id].ai = Some(new_ai);
+    }
+}
+
+fn ai_basic(monster_id: usize, tcod: &Tcod, game: &mut Game, game_objects: &mut Vec<GameObject>) -> Ai {
     let (monster_x, monster_y) = game_objects[monster_id].position();
     if tcod.fov.is_in_fov(monster_x, monster_y) {
         if game_objects[monster_id].distance_to(&game_objects[PLAYER]) >= 2.0 {
@@ -713,6 +736,32 @@ fn ai_take_turn(monster_id: usize, tcod: &Tcod, game: &mut Game, game_objects: &
             let (monster, player) = mut_two(monster_id, PLAYER, game_objects);
             monster.attack(player, game);
         }
+    }
+    Ai::Basic
+}
+
+fn ai_confused(monster_id: usize, _tcod: &Tcod, game: &mut Game, game_objects: &mut Vec<GameObject>, previous_ai: Box<Ai>, num_turns: i32) -> Ai {
+    if num_turns >= 0 {
+        move_game_object_by(
+            monster_id,
+            rand::thread_rng().gen_range(-1, 2),
+            rand::thread_rng().gen_range(-1, 2),
+            &game.map,
+            game_objects,
+        );
+        Ai::Confused {
+            previous_ai: previous_ai,
+            num_turns: num_turns - 1,
+        }
+    } else {
+        game.messages.add(
+            format!(
+                "{} is no longer confused",
+                game_objects[monster_id].name,
+            ),
+            WHITE,
+        );
+        *previous_ai
     }
 }
 
@@ -830,7 +879,8 @@ fn use_item(inventory_id: usize, tcod: &mut Tcod, game: &mut Game, game_objects:
     if let Some(item) = game.inventory[inventory_id].item {
         let on_use = match item {
             Heal => cast_heal,
-            ScrollOfLightning => cast_lightning
+            ScrollOfLightning => cast_lightning,
+            ScrollOfConfusion => cast_confusion,
         };
         match on_use(inventory_id, tcod, game, game_objects) {
             UseResult::UsedUp => {
@@ -845,6 +895,31 @@ fn use_item(inventory_id: usize, tcod: &mut Tcod, game: &mut Game, game_objects:
             format!("The {} cannot be used", game.inventory[inventory_id].name),
             WHITE,
         )
+    }
+}
+
+fn cast_confusion(_inventory_id: usize, tcod: &mut Tcod, game: &mut Game, game_objects: &mut Vec<GameObject>) -> UseResult {
+    let monster_id = closest_monster(tcod, game_objects, CONFUSION_RANGE);
+    if let Some(monster_id) = monster_id {
+        let old_ai = game_objects[monster_id].ai.take().unwrap_or(Ai::Basic);
+        game_objects[monster_id].ai = Some(Ai::Confused {
+            previous_ai: Box::new(old_ai),
+            num_turns: CONFUSE_TURN_COUNT,
+        });
+        game.messages.add(
+            format!(
+                "{} is confused !",
+                game_objects[monster_id].name,
+            ),
+            WHITE,
+        );
+        UseResult::UsedUp 
+    } else {
+        game.messages.add(
+            "There is no enemy to strike.",
+            RED,
+        );
+        UseResult::Cancelled
     }
 }
 
