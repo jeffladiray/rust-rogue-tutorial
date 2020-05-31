@@ -56,7 +56,9 @@ const LIGHTNING_RANGE: i32 = 5;
 const LIGHTNING_DAMAGE: i32 = 40;
 const CONFUSION_RANGE: i32 = 5;
 const CONFUSE_TURN_COUNT: i32 = 10;
-
+const BLIZZARD_RANGE: i32 = 10;
+const BLIZZARD_TURN_COUNT: i32 = 5;
+const BLIZZARD_DAMAGE: i32 = 2;
 // NOTICE: FOV parameters
 const FOV_ALGORITHM: FovAlgorithm = FovAlgorithm::Basic;
 const FOV_LIGHT_WALLS: bool = true;
@@ -281,6 +283,10 @@ enum Ai {
     Confused {
         previous_ai: Box<Ai>,
         num_turns: i32,
+    },
+    Frozen {
+        previous_ai: Box<Ai>,
+        num_turns: i32,
     }
 }
 
@@ -307,6 +313,7 @@ enum Item {
     Heal,
     ScrollOfLightning,
     ScrollOfConfusion,
+    ScrollOfBlizzard,
 }
 
 enum UseResult {
@@ -437,7 +444,7 @@ fn place_game_objects(room: Rectangle, map: &Map, game_objects: &mut Vec<GameObj
 
         if !is_blocked(x, y, map, game_objects) {
             let dice = rand::random::<f32>();
-            let item = if dice < 0.7 {
+            let item = if dice < 0.6 {
                 let mut game_object = GameObject::new(
                     x,
                     y,
@@ -448,7 +455,7 @@ fn place_game_objects(room: Rectangle, map: &Map, game_objects: &mut Vec<GameObj
                 );
                 game_object.item = Some(Item::Heal);
                 game_object
-            } else if dice < 0.8 {
+            } else if dice < 0.7 {
                 let mut game_object = GameObject::new(
                     x,
                     y,
@@ -459,9 +466,13 @@ fn place_game_objects(room: Rectangle, map: &Map, game_objects: &mut Vec<GameObj
                 );
                 game_object.item = Some(Item::ScrollOfLightning);
                 game_object
-            } else {
+            } else if dice < 0.8 {
                 let mut game_object = GameObject::new(x, y, 'c', LIGHT_YELLOW, "scroll of confusion", false);
                 game_object.item = Some(Item::ScrollOfConfusion);
+                game_object
+            } else {
+                let mut game_object = GameObject::new(x, y, 'b', LIGHT_YELLOW, "scroll of blizzard", false);
+                game_object.item = Some(Item::ScrollOfBlizzard);
                 game_object
             };
 
@@ -721,8 +732,30 @@ fn ai_take_turn(monster_id: usize, tcod: &Tcod, game: &mut Game, game_objects: &
                 previous_ai,
                 num_turns,
             } => ai_confused(monster_id, tcod, game, game_objects, previous_ai, num_turns),
+            Frozen {
+                previous_ai,
+                num_turns,
+            } => ai_frozen(monster_id, tcod, game, game_objects, previous_ai, num_turns),
         };
         game_objects[monster_id].ai = Some(new_ai);
+    }
+}
+
+fn ai_frozen(monster_id: usize, _tcod: &Tcod, game: &mut Game, game_objects: &mut Vec<GameObject>, previous_ai: Box<Ai>, num_turns: i32) -> Ai {
+    if num_turns >= 0 {
+        Ai::Frozen {
+            previous_ai: previous_ai,
+            num_turns: num_turns - 1,
+        }
+    } else {
+        game.messages.add(
+            format!(
+                "{} is no longer frozen",
+                game_objects[monster_id].name,
+            ),
+            WHITE,
+        );
+        *previous_ai
     }
 }
 
@@ -844,7 +877,7 @@ fn menu<T: AsRef<str>>(header: &str, options: &[T], width: i32, root: &mut Root)
     );
 
     for (index, option_text) in options.iter().enumerate() {
-        let menu_letter = (b'a' + index as u8) as char;
+        let menu_letter = (b'1' + index as u8) as char;
         let text = format!("({}) {}", menu_letter, option_text.as_ref());
         window.print_ex(
             0,
@@ -881,6 +914,7 @@ fn use_item(inventory_id: usize, tcod: &mut Tcod, game: &mut Game, game_objects:
             Heal => cast_heal,
             ScrollOfLightning => cast_lightning,
             ScrollOfConfusion => cast_confusion,
+            ScrollOfBlizzard => cast_blizzard,
         };
         match on_use(inventory_id, tcod, game, game_objects) {
             UseResult::UsedUp => {
@@ -896,6 +930,48 @@ fn use_item(inventory_id: usize, tcod: &mut Tcod, game: &mut Game, game_objects:
             WHITE,
         )
     }
+}
+
+fn cast_blizzard(_inventory_id: usize, tcod: &mut Tcod, game: &mut Game, game_objects: &mut Vec<GameObject>) -> UseResult {
+    let monsters_id = find_monsters_in_radius(tcod, game_objects, BLIZZARD_RANGE);
+    if !monsters_id.is_empty() {
+        for id in monsters_id {
+            let old_ai = game_objects[id].ai.take().unwrap_or(Ai::Basic);
+            game_objects[id].ai = Some(Ai::Frozen {
+                previous_ai: Box::new(old_ai),
+                num_turns: BLIZZARD_TURN_COUNT,  
+            });
+            game_objects[id].take_damage(BLIZZARD_DAMAGE, game);
+            game.messages.add(
+                format!(
+                    "{} is frozen !",
+                    game_objects[id].name,
+                ),
+                WHITE,
+            );
+        }
+        UseResult::UsedUp 
+    } else {
+        game.messages.add(
+            "There is no enemy to strike.",
+            RED,
+        );
+        UseResult::Cancelled 
+    }
+}
+
+fn find_monsters_in_radius(_tcod: &Tcod, game_objects: &Vec<GameObject>, max_range: i32) -> Vec<usize> {
+    let mut ennemies_in_radius = vec![];
+    for (id, game_object) in game_objects.iter().enumerate() {
+        if id != PLAYER
+            && game_object.fighter.is_some()
+            && game_object.ai.is_some()
+            && game_objects[PLAYER].distance_to(game_object) < (max_range as f32)
+        {
+            ennemies_in_radius.push(id);
+        }
+    }
+    ennemies_in_radius
 }
 
 fn cast_confusion(_inventory_id: usize, tcod: &mut Tcod, game: &mut Game, game_objects: &mut Vec<GameObject>) -> UseResult {
