@@ -1,6 +1,7 @@
 use tcod::colors::*;
 use tcod::console::*;
 use tcod::map::{ FovAlgorithm, Map as FovMap };
+use tcod::input::{ self, Event, Key, Mouse };
 use std::cmp;
 use rand::Rng;
 
@@ -65,6 +66,8 @@ struct Tcod {
     con: Offscreen,
     panel: Offscreen,
     fov: FovMap,
+    key: Key,
+    mouse: Mouse,
 }
 
 
@@ -426,6 +429,13 @@ fn render_bar(
 }
 
 fn render_all(tcod: &mut Tcod, game: &mut Game, game_objects: &Vec<GameObject>, fov_need_recompute: bool) {
+
+    match input::check_for_event(input::MOUSE | input::KEY_PRESS) {
+        Some((_, Event::Mouse(m))) => tcod.mouse = m,
+        Some((_, Event::Key(k))) => tcod.key = k,
+        _ => tcod.key = Default::default(),
+    }
+
     if fov_need_recompute {
         let player = &game_objects[PLAYER];
         tcod.fov.compute_fov(player.x, player.y, TORCH_RADIUS, FOV_LIGHT_WALLS, FOV_ALGORITHM);
@@ -511,6 +521,16 @@ fn render_all(tcod: &mut Tcod, game: &mut Game, game_objects: &Vec<GameObject>, 
         DARKER_RED,
     );
 
+    tcod.panel.set_default_foreground(LIGHT_GREY);
+    tcod.panel.print_ex(
+        1,
+        0,
+        BackgroundFlag::None,
+        TextAlignment::Left,
+        get_names_under_mouse(tcod.mouse, game_objects, &tcod.fov),
+    );
+
+
     blit(
         &tcod.panel,
         (0, 0),
@@ -522,15 +542,25 @@ fn render_all(tcod: &mut Tcod, game: &mut Game, game_objects: &Vec<GameObject>, 
     );
 }
 
-fn handle_keys(tcod: &mut Tcod, game: &mut Game, game_objects: &mut Vec<GameObject>) -> PlayerAction {
-    use tcod::input::Key;
-    use tcod::input::KeyCode::*;
-    use PlayerAction::*;
+fn get_names_under_mouse(mouse: Mouse, game_objects: &Vec<GameObject>, fov_map: &FovMap) -> String {
+    let (x, y) = (mouse.cx as i32, mouse.cy as i32);
 
-    let key = tcod.root.wait_for_keypress(true);
+    let names = game_objects
+        .iter()
+        .filter(|game_object| game_object.position() == (x, y) && fov_map.is_in_fov(game_object.x, game_object.y))
+        .map(|obj| obj.name.clone())
+        .collect::<Vec<_>>();
+
+    names.join(", ")
+}
+
+fn handle_keys(tcod: &mut Tcod, game: &mut Game, game_objects: &mut Vec<GameObject>) -> PlayerAction {
+    use PlayerAction::*;
+    use tcod::input::KeyCode::*;
+
     let player_alive = game_objects[PLAYER].is_alive;
 
-    match (key, key.text(), player_alive) {
+    match (tcod.key, tcod.key.text(), player_alive) {
         (Key { code: Up, .. }, _, true) => {
             player_move_or_attack(0, -1, game, game_objects);
             TookTurn
@@ -650,6 +680,8 @@ fn main() {
         con: Offscreen::new(MAP_WIDTH, MAP_HEIGHT),
         panel: Offscreen::new(SCREEN_WIDTH, PANEL_HEIGHT),
         fov: FovMap::new(MAP_WIDTH, MAP_HEIGHT),
+        key: Default::default(),
+        mouse: Default::default(),
     };
 
     let mut player = GameObject::new(25, 23, '@', WHITE, "player", true);
