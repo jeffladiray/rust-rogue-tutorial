@@ -2,6 +2,8 @@ use tcod::colors::*;
 use tcod::console::*;
 use tcod::input::Key;
 use tcod::input::KeyCode::*;
+use std::cmp;
+use rand::Rng;
 
 // NOTICE: General window & game settings
 const SCREEN_WIDTH: i32 = 80;
@@ -14,7 +16,15 @@ const MAP_WIDTH: i32 = 80;
 const MAP_HEIGHT: i32 = SCREEN_HEIGHT - 5;
 
 const COLOR_DARK_WALL: Color = Color { r: 0, g: 0, b: 100 };
-const COLOR_DARK_GROUND: Color = Color { r: 50, g: 50, b: 150 };
+const COLOR_DARK_GROUND: Color = Color {
+    r: 50,
+    g: 50,
+    b: 150,
+};
+
+const ROOM_MAX_SIZE: i32 = 10;
+const ROOM_MIN_SIZE: i32 = 5;
+const MAX_ROOMS: i32 = 10;
 
 struct Tcod {
     root: Root,
@@ -75,9 +85,93 @@ struct Game {
     map: Map,
 }
 
-fn make_map() -> Map {
-    let mut map = vec![vec![Tile::empty(); MAP_HEIGHT as usize]; MAP_WIDTH as usize];
+#[derive(Clone, Copy, Debug)]
+struct Rectangle {
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+}
+
+impl Rectangle {
+    pub fn new(x: i32, y: i32, w: i32, h: i32) -> Self {
+        Rectangle {
+            x1: x,
+            y1: y,
+            x2: x + w,
+            y2: y + h,
+        }
+    }
+
+    pub fn center(&self) -> (i32, i32) {
+        let center_x = (self.x1 + self.x2) / 2;
+        let center_y = (self.y1 + self.y2) / 2;
+
+        (center_x, center_y)
+    }
+
+    pub fn is_intersecting(&self, other: &Rectangle) -> bool {
+        (self.x1 <= other.x2)
+            && (self.x2 >= other.x1)
+            && (self.y1 <= other.y2)
+            && (self.y2 >= other.y1) 
+    }
+}
+
+fn make_room(room: Rectangle, map: &mut Map) {
+    for x in (room.x1 + 1)..room.x2 {
+        for y in (room.y1 + 1)..room.y2 {
+            map[x as usize][y as usize] = Tile::empty();
+        }
+    }
+}
+
+fn make_horizontal_tunnel(x1: i32, x2: i32, y: i32, map: &mut Map) {
+    for x in cmp::min(x1, x2)..(cmp::max(x1, x2) + 1) {
+        map[x as usize][y as usize] = Tile::empty();
+    }
+}
+
+fn make_vertical_tunnel(y1: i32, y2: i32, x: i32, map: &mut Map) {
+    for y in cmp::min(y1, y2)..(cmp::max(y1, y2) + 1) {
+        map[x as usize][y as usize] = Tile::empty();
+    }
+}
+
+fn make_map(player: &mut GameObject) -> Map {
+    let mut map = vec![vec![Tile::wall(); MAP_HEIGHT as usize]; MAP_WIDTH as usize];
     
+    let mut rooms = vec![];
+
+    for _ in 0..MAX_ROOMS {
+        let w = rand::thread_rng().gen_range(ROOM_MIN_SIZE, ROOM_MAX_SIZE + 1);
+        let h = rand::thread_rng().gen_range(ROOM_MIN_SIZE, ROOM_MAX_SIZE + 1);
+        let x = rand::thread_rng().gen_range(0, MAP_WIDTH - w);
+        let y = rand::thread_rng().gen_range(0, MAP_HEIGHT - h);
+
+        let new_room = Rectangle::new(x, y, w, h);
+        let failed = rooms.iter().any(|other_room| new_room.is_intersecting(other_room));
+        if !failed {
+            make_room(new_room, &mut map);
+
+            let (new_x, new_y) = new_room.center();
+            if rooms.is_empty() {
+                player.x = new_x;
+                player.y = new_y;
+            } else {
+                let (prev_x, prev_y) = rooms[rooms.len() - 1].center();
+
+                if rand::random() {
+                    make_horizontal_tunnel(prev_x, new_x, prev_y, &mut map);
+                    make_vertical_tunnel(prev_y, new_y, new_x, &mut map);
+                } else {
+                    make_vertical_tunnel(prev_y, new_y, prev_x, &mut map);
+                    make_horizontal_tunnel(prev_x, new_x, new_y, &mut map);
+                }
+            }
+            rooms.push(new_room);
+        }
+    }
     map
 }
 
@@ -90,9 +184,11 @@ fn render_all(tcod: &mut Tcod, game: &Game, game_objects: &[GameObject]) {
         for x in 0..MAP_WIDTH {
             let is_wall = game.map[x as usize][y as usize].block_sight;
             if is_wall {
-                tcod.con.set_char_background(x, y, COLOR_DARK_WALL, BackgroundFlag::Set);
+                tcod.con
+                    .set_char_background(x, y, COLOR_DARK_WALL, BackgroundFlag::Set);
             } else {
-                tcod.con.set_char_background(x, y, COLOR_DARK_GROUND, BackgroundFlag::Set);
+                tcod.con
+                    .set_char_background(x, y, COLOR_DARK_GROUND, BackgroundFlag::Set);
             }
         }
     }
@@ -145,14 +241,12 @@ fn main() {
 
     let mut tcod = Tcod { root, con };
 
-    let game = Game {
-        map: make_map(),
-    };
+    let player = GameObject::new(25, 23, '@', WHITE);
+    let mut game_objects = [player];
 
-    let player = GameObject::new(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2, '@', WHITE);
-    let npc = GameObject::new(SCREEN_WIDTH / 2 - 5, SCREEN_HEIGHT / 2 - 5, '@', YELLOW);
+    let game = Game { map: make_map(&mut game_objects[0]) };
 
-    let mut game_objects = [player, npc];
+
 
     while !tcod.root.window_closed() {
         tcod.con.clear();
@@ -166,6 +260,5 @@ fn main() {
         if exit {
             break;
         }
-
     }
 }
