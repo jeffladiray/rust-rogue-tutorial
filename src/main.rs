@@ -20,15 +20,15 @@ const MAP_WIDTH: i32 = 80;
 const MAP_HEIGHT: i32 = SCREEN_HEIGHT - PANEL_HEIGHT;
 
 const COLOR_DARK_WALL: Color = Color { 
-    r: 0,
-    g: 0,
-    b: 100
+    r: 111,
+    g: 103,
+    b: 118,
 };
 
 const COLOR_DARK_GROUND: Color = Color {
-    r: 50,
-    g: 50,
-    b: 150,
+    r: 154,
+    g: 154,
+    b: 151,
 };
 
 const COLOR_LIGHT_WALL: Color = Color {
@@ -47,6 +47,8 @@ const ROOM_MAX_SIZE: i32 = 10;
 const ROOM_MIN_SIZE: i32 = 5;
 const MAX_ROOMS: i32 = 10;
 const MAX_ROOM_MONSTERS: i32 = 3;
+
+const MAX_ROOM_ITEMS: i32 = 3;
 
 // NOTICE: FOV parameters
 const FOV_ALGORITHM: FovAlgorithm = FovAlgorithm::Basic;
@@ -89,6 +91,7 @@ struct GameObject {
     is_alive: bool,
     fighter: Option<Fighter>,
     ai: Option<Ai>,
+    item: Option<Item>,
 }
 
 impl GameObject {
@@ -103,6 +106,7 @@ impl GameObject {
             is_alive: false,
             fighter: None,
             ai: None,
+            item: None,
         }
     }
 
@@ -193,6 +197,7 @@ type Map = Vec<Vec<Tile>>;
 struct Game {
     map: Map,
     messages: Messages,
+    inventory: Vec<GameObject>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -274,6 +279,33 @@ impl Messages {
 
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &(String, Color)> {
         self.messages.iter()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Item {
+    Heal,
+}
+
+fn pick_item_up(object_id: usize, game: &mut Game, game_objects: &mut Vec<GameObject>) {
+    if game.inventory.len() >= 9 {
+        game.messages.add(
+            format!(
+                "Cannot pickup {}, inventory is full!",
+                game_objects[object_id].name,
+            ),
+            RED,
+        );
+    } else {
+        let item = game_objects.swap_remove(object_id);
+        game.messages.add(
+            format!(
+                "You picked up {}",
+                item.name
+            ),
+            GREEN,
+        );
+        game.inventory.push(item);
     }
 }
 
@@ -367,6 +399,19 @@ fn place_objects(room: Rectangle, map: &Map, game_objects: &mut Vec<GameObject>)
             monster.ai = Some(Ai::Basic);
 
             game_objects.push(monster);
+        }
+    }
+
+    let item_count = rand::thread_rng().gen_range(0, MAX_ROOM_ITEMS + 1);
+
+    for _ in 0..item_count {
+        let x = rand::thread_rng().gen_range(room.x1 + 1, room.x2);
+        let y = rand::thread_rng().gen_range(room.y1 + 1, room.y2);
+
+        if !is_blocked(x, y, map, game_objects) {
+            let mut game_object = GameObject::new(x, y, '!', VIOLET, "healing potion", false);
+            game_object.item = Some(Item::Heal);
+            game_objects.push(game_object);
         }
     }
 }
@@ -573,6 +618,15 @@ fn handle_keys(tcod: &mut Tcod, game: &mut Game, game_objects: &mut Vec<GameObje
             player_move_or_attack(-1, 0, game, game_objects);
             TookTurn
         }
+        (Key {code: Text, .. }, "g", true) => {
+            let item_id = game_objects
+                .iter()
+                .position(|game_object| game_object.position() == game_objects[PLAYER].position() && game_object.item.is_some());
+            if let Some(item_id) = item_id {
+                pick_item_up(item_id, game, game_objects);
+            }
+            DidntTakeTurn
+        }
         (Key { code: Right, .. }, _, true) => {
             player_move_or_attack(1, 0, game, game_objects);
             TookTurn
@@ -698,6 +752,7 @@ fn main() {
     let mut game = Game {
         map: make_map(&mut game_objects),
         messages: Messages::new(),
+        inventory: vec![],
     };
 
     game.messages.add(
