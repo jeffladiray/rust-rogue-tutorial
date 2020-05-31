@@ -1,7 +1,5 @@
 use tcod::colors::*;
 use tcod::console::*;
-use tcod::input::Key;
-use tcod::input::KeyCode::*;
 use tcod::map::{ FovAlgorithm, Map as FovMap };
 use std::cmp;
 use rand::Rng;
@@ -43,17 +41,28 @@ const COLOR_LIGHT_GROUND: Color = Color {
 const ROOM_MAX_SIZE: i32 = 10;
 const ROOM_MIN_SIZE: i32 = 5;
 const MAX_ROOMS: i32 = 10;
+const MAX_ROOM_MONSTERS: i32 = 3;
 
 // NOTICE: FOV parameters
 const FOV_ALGORITHM: FovAlgorithm = FovAlgorithm::Basic;
 const FOV_LIGHT_WALLS: bool = true;
 const TORCH_RADIUS: i32 = 10;
 
+// NOTICE: Player is always first game object
+const PLAYER: usize = 0;
 
 struct Tcod {
     root: Root,
     con: Offscreen,
     fov: FovMap,
+}
+
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PlayerAction {
+    TookTurn,
+    DidntTakeTurn,
+    Exit,
 }
 
 #[derive(Debug)]
@@ -62,23 +71,36 @@ struct GameObject {
     y: i32,
     char: char,
     color: Color,
+    name: String,
+    blocks: bool,
+    is_alive: bool,
 }
 
 impl GameObject {
-    pub fn new(x: i32, y: i32, char: char, color: Color) -> Self {
-        GameObject { x, y, char, color }
-    }
-
-    pub fn move_by(&mut self, dx: i32, dy: i32, game: &Game) {
-        if !game.map[(self.x + dx) as usize][(self.y + dy) as usize].blocked {
-            self.x += dx;
-            self.y += dy;
+    pub fn new(x: i32, y: i32, char: char, color: Color, name: &str, blocks: bool) -> Self {
+        GameObject {
+            x: x,
+            y: y,
+            char: char,
+            color: color,
+            name: name.into(),
+            blocks: blocks,
+            is_alive: false,
         }
     }
 
     pub fn draw(&self, con: &mut dyn Console) {
         con.set_default_foreground(self.color);
         con.put_char(self.x, self.y, self.char, BackgroundFlag::None);
+    }
+
+    pub fn position(&self) -> (i32, i32) {
+        (self.x, self.y)
+    }
+
+    pub fn set_position(&mut self, x: i32, y: i32) {
+        self.x = x;
+        self.y = y;
     }
 }
 
@@ -163,9 +185,9 @@ fn make_vertical_tunnel(y1: i32, y2: i32, x: i32, map: &mut Map) {
     }
 }
 
-fn make_map(player: &mut GameObject) -> Map {
+fn make_map(game_objects: &mut Vec<GameObject>) -> Map {
     let mut map = vec![vec![Tile::wall(); MAP_HEIGHT as usize]; MAP_WIDTH as usize];
-    
+
     let mut rooms = vec![];
 
     for _ in 0..MAX_ROOMS {
@@ -178,11 +200,11 @@ fn make_map(player: &mut GameObject) -> Map {
         let failed = rooms.iter().any(|other_room| new_room.is_intersecting(other_room));
         if !failed {
             make_room(new_room, &mut map);
+            place_objects(new_room, &map, game_objects);
 
             let (new_x, new_y) = new_room.center();
             if rooms.is_empty() {
-                player.x = new_x;
-                player.y = new_y;
+                game_objects[PLAYER].set_position(new_x, new_y);
             } else {
                 let (prev_x, prev_y) = rooms[rooms.len() - 1].center();
 
@@ -200,9 +222,43 @@ fn make_map(player: &mut GameObject) -> Map {
     map
 }
 
+fn place_objects(room: Rectangle, map: &Map, game_objects: &mut Vec<GameObject>) {
+    let monster_count = rand::thread_rng().gen_range(0, MAX_ROOM_MONSTERS + 1);
+    for _ in 0..monster_count {
+        let x = rand::thread_rng().gen_range(room.x1 + 1, room.x2);
+        let y = rand::thread_rng().gen_range(room.y1 + 1, room.y2);
+        if !is_blocked(x, y, map, game_objects) {
+            let mut monster = if rand::random::<f32>() < 0.8 {
+                GameObject::new(x, y, 'o', DESATURATED_GREEN, "orc", true)
+            } else {
+                GameObject::new(x, y, 't', DARKER_GREEN, "troll", true)
+            };
+            monster.is_alive = true;
+            game_objects.push(monster);
+        }
+    }
+}
+
+fn is_blocked(x: i32, y: i32, map: &Map, game_objects: &[GameObject]) -> bool {
+    if map[x as usize][y as usize].blocked {
+        return true;
+    }
+
+    game_objects
+        .iter()
+        .any(|game_object| game_object.blocks && game_object.position() == (x, y))
+}
+
+fn move_game_object_by(id: usize, dx: i32, dy: i32, game: &Game, game_objects: &mut [GameObject]) {
+    let (x, y) = game_objects[id].position();
+    if !is_blocked(x + dx, y + dy, &game.map, game_objects) {
+        game_objects[id].set_position(x + dx, y + dy);
+    }
+}
+
 fn render_all(tcod: &mut Tcod, game: &Game, game_objects: &[GameObject], fov_need_recompute: bool) {
     if fov_need_recompute {
-        let player = &game_objects[0];
+        let player = &game_objects[PLAYER];
         tcod.fov.compute_fov(player.x, player.y, TORCH_RADIUS, FOV_LIGHT_WALLS, FOV_ALGORITHM);
     }
 
@@ -238,27 +294,47 @@ fn render_all(tcod: &mut Tcod, game: &Game, game_objects: &[GameObject], fov_nee
     );
 }
 
-fn handle_keys(tcod: &mut Tcod, game: &Game, player: &mut GameObject) -> bool {
-    let key = tcod.root.wait_for_keypress(true);
+fn handle_keys(tcod: &mut Tcod, game: &Game, game_objects: &mut Vec<GameObject>) -> PlayerAction {
+    use tcod::input::Key;
+    use tcod::input::KeyCode::*;
+    use PlayerAction::*;
 
-    match key {
-        Key { code: Up, .. } => player.move_by(0, -1, game),
-        Key { code: Down, .. } => player.move_by(0, 1, game),
-        Key { code: Left, .. } => player.move_by(-1, 0, game),
-        Key { code: Right, .. } => player.move_by(1, 0, game),
-        Key {
-            code: Enter,
-            alt: true,
-            ..
-        } => {
+    let key = tcod.root.wait_for_keypress(true);
+    let player_alive = game_objects[PLAYER].is_alive;
+
+    match (key, key.text(), player_alive) {
+        (Key { code: Up, .. }, _, true) => {
+            move_game_object_by(PLAYER, 0, -1, game, game_objects);
+            TookTurn
+        }
+        (Key { code: Down, .. }, _, true) => {
+            move_game_object_by(PLAYER, 0, 1, game, game_objects);
+            TookTurn
+        }
+        (Key { code: Left, .. }, _, true) => {
+            move_game_object_by(PLAYER, -1, 0, game, game_objects);
+            TookTurn
+        }
+        (Key { code: Right, .. }, _, true) => {
+            move_game_object_by(PLAYER, 1, 0, game, game_objects);
+            TookTurn
+        }
+        (
+            Key {
+                code: Enter,
+                alt: true,
+                ..
+            },
+            _,
+            _,
+        ) => {
             let is_fullscreen = tcod.root.is_fullscreen();
             tcod.root.set_fullscreen(!is_fullscreen);
+            DidntTakeTurn
         }
-        Key { code: Escape, .. } => return true,
-        _ => {}
+        (Key { code: Escape, .. }, _, _) => Exit,
+        _ => DidntTakeTurn,
     }
-
-    false
 }
 
 fn main() {
@@ -277,10 +353,12 @@ fn main() {
         fov: FovMap::new(MAP_WIDTH, MAP_HEIGHT),
     };
 
-    let player = GameObject::new(25, 23, '@', WHITE);
-    let mut game_objects = [player];
+    let mut player = GameObject::new(25, 23, '@', WHITE, "player", true);
+    player.is_alive = true;
 
-    let game = Game { map: make_map(&mut game_objects[0]) };
+    let mut game_objects = vec![player];
+
+    let game = Game { map: make_map(&mut game_objects) };
 
     for y in 0..MAP_HEIGHT {
         for x in 0..MAP_WIDTH {
@@ -298,16 +376,24 @@ fn main() {
     while !tcod.root.window_closed() {
         tcod.con.clear();
 
-        let fov_need_recompute = previous_player_position != (game_objects[0].x, game_objects[0].y);
+        let fov_need_recompute = previous_player_position != game_objects[PLAYER].position();
         render_all(&mut tcod, &game, &game_objects, fov_need_recompute);
 
         tcod.root.flush();
 
-        let player = &mut game_objects[0];
+        let player = &mut game_objects[PLAYER];
         previous_player_position = (player.x, player.y);
-        let exit = handle_keys(&mut tcod, &game, player);
-        if exit {
+        let player_action = handle_keys(&mut tcod, &game, &mut game_objects);
+        if player_action == PlayerAction::Exit {
             break;
+        }
+
+        if game_objects[PLAYER].is_alive && player_action != PlayerAction::DidntTakeTurn {
+            for game_object in &game_objects {
+                if (game_object as *const _) != (&game_objects[PLAYER] as *const _) {
+                    println!("The {} growls", game_object.name);
+                }
+            }
         }
     }
 }
