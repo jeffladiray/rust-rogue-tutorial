@@ -48,7 +48,10 @@ const ROOM_MIN_SIZE: i32 = 5;
 const MAX_ROOMS: i32 = 10;
 const MAX_ROOM_MONSTERS: i32 = 3;
 
+// NOTICE: Inventory constants 
 const MAX_ROOM_ITEMS: i32 = 3;
+const INVENTORY_WIDTH: i32 = 50;
+const HEAL_AMOUNT: i32 = 4;
 
 // NOTICE: FOV parameters
 const FOV_ALGORITHM: FovAlgorithm = FovAlgorithm::Basic;
@@ -163,6 +166,15 @@ impl GameObject {
                 ),
                 WHITE,
             );
+        }
+    }
+
+    pub fn heal(&mut self, amount: i32) {
+        if let Some(ref mut fighter) = self.fighter {
+            fighter.hp += amount;
+            if fighter.hp > fighter.max_hp {
+                fighter.hp = fighter.max_hp;
+            }
         }
     }
 }
@@ -285,6 +297,11 @@ impl Messages {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Item {
     Heal,
+}
+
+enum UseResult {
+    UsedUp,
+    Cancelled,
 }
 
 fn pick_item_up(object_id: usize, game: &mut Game, game_objects: &mut Vec<GameObject>) {
@@ -618,12 +635,23 @@ fn handle_keys(tcod: &mut Tcod, game: &mut Game, game_objects: &mut Vec<GameObje
             player_move_or_attack(-1, 0, game, game_objects);
             TookTurn
         }
-        (Key {code: Text, .. }, "g", true) => {
+        (Key { code: Text, .. }, "g", true) => {
             let item_id = game_objects
                 .iter()
                 .position(|game_object| game_object.position() == game_objects[PLAYER].position() && game_object.item.is_some());
             if let Some(item_id) = item_id {
                 pick_item_up(item_id, game, game_objects);
+            }
+            DidntTakeTurn
+        }
+        (Key { code: Text, ..}, "i", true) => {
+            let inventory_index = inventory_menu(
+                &mut game.inventory,
+                "Press the key next to an item to use it, or any other to cancel.\n",
+                &mut tcod.root,
+            );
+            if let Some(inventory_index) = inventory_index {
+                use_item(inventory_index, tcod, game, game_objects);
             }
             DidntTakeTurn
         }
@@ -717,6 +745,117 @@ fn monster_death(monster: &mut GameObject, game: &mut Game) {
     monster.fighter = None;
     monster.ai = None;
     monster.name = format!("remains of {}", monster.name);
+}
+
+fn menu<T: AsRef<str>>(header: &str, options: &[T], width: i32, root: &mut Root) -> Option<usize> {
+    assert!(
+        options.len() <= 9,
+        "Cannot have a menu with more than 9 options."
+    );
+
+    let header_height = root.get_height_rect(0, 0, width, SCREEN_HEIGHT, header);
+    let height = options.len() as i32 + header_height;
+
+    let mut window = Offscreen::new(width, height);
+    window.set_default_foreground(WHITE);
+    window.print_rect_ex(
+        0,
+        0,
+        width,
+        height,
+        BackgroundFlag::None,
+        TextAlignment::Left,
+        header,
+    );
+
+    for (index, option_text) in options.iter().enumerate() {
+        let menu_letter = (b'a' + index as u8) as char;
+        let text = format!("({}) {}", menu_letter, option_text.as_ref());
+        window.print_ex(
+            0,
+            header_height + index as i32,
+            BackgroundFlag::None,
+            TextAlignment::Left,
+            text,
+        );
+    }
+
+    let x = SCREEN_WIDTH / 2 - width / 2;
+    let y = SCREEN_HEIGHT / 2 - height / 2;
+    blit(&window, (0, 0), (width, height), root, (x, y), 1.0, 0.7);
+
+    root.flush();
+    let key = root.wait_for_keypress(true);
+    if key.printable.is_digit(10) {
+        let index = (key.printable.to_digit(10).unwrap() - 1) as usize;
+        if index < options.len() {
+            Some(index)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+fn use_item(inventory_id: usize, tcod: &mut Tcod, game: &mut Game, game_objects: &mut Vec<GameObject>) {
+    use Item::*;
+
+    if let Some(item) = game.inventory[inventory_id].item {
+        let on_use = match item {
+            Heal => cast_heal,
+        };
+        match on_use(inventory_id, tcod, game, game_objects) {
+            UseResult::UsedUp => {
+                game.inventory.remove(inventory_id);
+            }
+            UseResult::Cancelled => {
+                game.messages.add("Cancelled", WHITE);
+            }
+        }
+    } else {
+        game.messages.add(
+            format!("The {} cannot be used", game.inventory[inventory_id].name),
+            WHITE,
+        )
+    }
+}
+
+fn cast_heal(_inventory_id: usize, _tcod: &mut Tcod, game: &mut Game, game_object: &mut Vec<GameObject>) -> UseResult {
+    if let Some(fighter) = game_object[PLAYER].fighter {
+        if fighter.hp == fighter.max_hp {
+            game.messages.add(
+                "You are already at full health.",
+                RED,
+            );
+
+            return UseResult::Cancelled;
+        } else {
+            game.messages.add(
+                "Your wounds start to feel better!",
+                LIGHT_VIOLET
+            );
+            game_object[PLAYER].heal(HEAL_AMOUNT);
+            return UseResult::UsedUp;
+        }
+    }
+    UseResult::Cancelled
+}
+
+fn inventory_menu(inventory: &[GameObject], header: &str, root: &mut Root) -> Option<usize> {
+    let options = if inventory.len() == 0 {
+        vec!["Inventory is empty.".into()]
+    } else {
+        inventory.iter().map(|item| item.name.clone()).collect()
+    };
+
+    let inventory_index = menu(header, &options, INVENTORY_WIDTH, root);
+
+    if inventory.len() > 0 {
+        inventory_index
+    } else {
+        None
+    }
 }
 
 fn main() {
